@@ -40,7 +40,7 @@ plot_cluster_sizes <- function(C) {
 plot_cluster_evolution(cluster_history)
 
 # Final cluster assignments
-plot_cluster_heatmap(sim_data$y, result$C)
-plot_confusion_matrix(sim_data$C_true, result$C)
+plot_cluster_heatmap(y, result$C)
+plot_confusion_matrix(simulated_data$z, result$C)
 plot_cluster_sizes(result$C)
 

@@ -1,8 +1,7 @@
-library(MCMCpack)     # for Dirichlet
-library(BayesLogit)   # for Polya-Gamma
-library(MASS)         # for multivariate normal
+library(MCMCpack)
+library(BayesLogit)
+library(MASS)
 
-# Initialization
 initialize <- function(n, V, H, R) {
   list(
     C = sample(1:3, n, replace = TRUE),
@@ -15,50 +14,45 @@ initialize <- function(n, V, H, R) {
   )
 }
 
-# Update monoproduct choice probabilities (Step 1)
 update_pk <- function(C, y, V, alpha) {
   K <- length(unique(C))
   pk <- matrix(NA, nrow = K, ncol = V)
   for (k in 1:K) {
-    yk <- y[C == k, ]
-    nk <- colSums(yk)
-    pk[k, ] <- rdirichlet(1, alpha + nk)
+    yk <- y[C == k, , drop = FALSE]
+    nk <- if (is.null(nrow(yk))) yk else colSums(yk)
+    if (length(nk) != V) {
+      nk <- rep(0, V)
+    }
+    pk[k, ] <- rdirichlet(1, alpha[1:V] + nk[1:V])
   }
   return(pk)
 }
 
-# Update G_i class assignments (Step 2)
-update_G <- function(C, LA, nu, pi_list) {
-  n <- nrow(LA)
+update_G <- function(C, LA_list, nu, pi_list) {
+  n <- length(LA_list)
   G <- integer(n)
   K <- nrow(nu)
   
   for (i in 1:n) {
     cluster <- C[i]
-    
-    # Skip if cluster index is out of bounds
     if (cluster > K || cluster < 1) {
       warning(paste("Invalid cluster index:", cluster, "in G update — skipping"))
       G[i] <- sample(1:length(pi_list), 1)
       next
     }
-    
     log_probs <- sapply(1:length(nu[cluster, ]), function(h) {
       pi_h <- pi_list[[h]]
-      edges <- LA[i, ]
+      edges <- LA_list[[i]][lower.tri(LA_list[[i]])]
       loglik <- sum(edges * log(pi_h) + (1 - edges) * log(1 - pi_h))
       log(nu[cluster, h]) + loglik
     })
-    
     probs <- exp(log_probs - max(log_probs))
     probs <- probs / sum(probs)
     G[i] <- sample(1:length(probs), 1, prob = probs)
   }
-  
   return(G)
 }
 
-# Update ν_k (Step 3)
 update_nu <- function(C, G, H) {
   K <- length(unique(C))
   nu <- matrix(NA, nrow = K, ncol = H)
@@ -70,14 +64,11 @@ update_nu <- function(C, G, H) {
   return(nu)
 }
 
-# Update Z and X (Steps 4a–4c), simplified
-update_Z_X <- function(LA, G, X, lambda, Z_mu, Z_var) {
+update_Z_X <- function(LA_list, G, X, lambda, Z_mu, Z_var) {
   H <- dim(X)[1]
   V <- dim(X)[2]
   R <- dim(X)[3]
   L <- V * (V - 1) / 2
-  
-  # Placeholder Polya-Gamma augmentation and update
   Z <- rnorm(L, mean = Z_mu, sd = sqrt(Z_var))
   for (h in 1:H) {
     for (v in 1:V) {
@@ -87,7 +78,6 @@ update_Z_X <- function(LA, G, X, lambda, Z_mu, Z_var) {
   return(list(Z = Z, X = X))
 }
 
-# Update λ using Multiplicative Inverse Gamma (MIG) prior (Step 4c)
 update_lambda <- function(X, a1 = 2.5, a2 = 3.5) {
   H <- dim(X)[1]
   R <- dim(X)[3]
@@ -105,21 +95,19 @@ update_lambda <- function(X, a1 = 2.5, a2 = 3.5) {
   return(lambda)
 }
 
-# Update cluster assignments C_i (Table 2)
-update_C <- function(y, LA, pk, nu, alpha_c, pi_list, G) {
+update_C <- function(y, LA_list, pk, nu, alpha_c, pi_list, G) {
   n <- nrow(y)
   C_new <- integer(n)
   K <- nrow(pk)
-  
   for (i in 1:n) {
     counts <- tabulate(C_new[-i], nbins = K)
     probs <- numeric(K + 1)
     for (k in 1:K) {
-      logp_y <- sum(y[i, ] * log(pk[k, ]))
+      logp_y <- sum(y[i, 1:ncol(pk)] * log(pk[k, 1:ncol(pk)]))
       logp_g <- log(nu[k, G[i]])
       probs[k] <- log(counts[k] + alpha_c) + logp_y + logp_g
     }
-    probs[K + 1] <- log(alpha_c) # New cluster
+    probs[K + 1] <- log(alpha_c)
     probs <- exp(probs - max(probs))
     probs <- probs / sum(probs)
     C_new[i] <- sample(1:(K + 1), 1, prob = probs)
@@ -127,45 +115,27 @@ update_C <- function(y, LA, pk, nu, alpha_c, pi_list, G) {
   return(C_new)
 }
 
-# Gibbs Sampler
-gibbs_sampler <- function(y, LA, n_iter = 1000, V = 15, H = 10, R = 5) {
+gibbs_sampler <- function(y, LA_list, n_iter = 1000, V = 15, H = 10, R = 5) {
   n <- nrow(y)
   alpha <- rep(1, V)
   alpha_c <- 1
   state <- initialize(n, V, H, R)
   cluster_history <- list()
-  
   for (t in 1:n_iter) {
-    # Update monoproduct choice distribution per cluster
     state$pk <- update_pk(state$C, y, V, alpha)
-    
-    # Expand nu matrix if new clusters appeared
     K_current <- max(state$C)
     if (nrow(state$nu) < K_current) {
       n_add <- K_current - nrow(state$nu)
-      state$nu <- rbind(
-        state$nu,
-        matrix(1 / H, nrow = n_add, ncol = H)  # uniform Dirichlet prior
-      )
+      state$nu <- rbind(state$nu, matrix(1 / H, nrow = n_add, ncol = H))
     }
-    
-    # Update G_i (latent class assignments)
-    state$G <- update_G(state$C, LA, state$nu, replicate(H, runif(V*(V-1)/2), simplify = FALSE))
-    
-    # Update mixing weights for each cluster
+    state$G <- update_G(state$C, LA_list, state$nu, replicate(H, runif(V * (V - 1) / 2), simplify = FALSE))
     state$nu <- update_nu(state$C, state$G, H)
-    
-    # Update latent eigenmodel (Z, X, lambda)
-    res <- update_Z_X(LA, state$G, state$X, state$lambda, Z_mu = 0, Z_var = 1)
+    res <- update_Z_X(LA_list, state$G, state$X, state$lambda, Z_mu = 0, Z_var = 1)
     state$Z <- res$Z
     state$X <- res$X
     state$lambda <- update_lambda(state$X)
-    
-    # Update cluster assignments
-    state$C <- update_C(y, LA, state$pk, state$nu, alpha_c, replicate(H, runif(V*(V-1)/2), simplify = FALSE), state$G)
+    state$C <- update_C(y, LA_list, state$pk, state$nu, alpha_c, replicate(H, runif(V * (V - 1) / 2), simplify = FALSE), state$G)
     cluster_history[[t]] <- state$C
   }
-  
   return(list(state, cluster_history))
 }
-
